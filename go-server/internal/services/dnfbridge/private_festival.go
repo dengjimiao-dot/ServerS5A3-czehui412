@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
+	"time"
 
 	"longheng.io/server/internal/modules/dnf/festival"
 	"longheng.io/server/internal/modules/dnf/pvf"
@@ -27,7 +28,13 @@ func parsePrivateFestivalCatalog(source pvf.Source, products map[uint32]currentC
 	}
 	for id := range c.Commodities {
 		p, ok := products[id]
-		if !ok || p.Count != 1 || p.CeraPrice == 0 {
+		if !ok {
+			// 商品已从 cerashop 下架（运营删除商城条目后 multibonus 仍引用）：
+			// 它永远不会出现在购物车里，festival 计数也不会触发，跳过即可。
+			// "存在但价格/数量异常"仍然 fail-closed。
+			continue
+		}
+		if p.Count != 1 || p.CeraPrice == 0 {
 			return nil, fmt.Errorf("invalid festival paid commodity %d", id)
 		}
 	}
@@ -92,42 +99,131 @@ func (s *Service) privateFestivalPreflight(session *gameSession, a *repo.Account
 	if q.FestivalSerial <= last {
 		return festival.ErrReplay
 	}
-	st, e := festival.Load(a.Metadata[festival.MetadataKey])
+	st, e := festival.Load(a.Metadata[festival.StateKey(strconv.Itoa(int(q.FestivalOwner.character)))])
 	if e != nil {
 		return e
 	}
 	return festival.CheckReceipt(st, q.FestivalRequestID, q.FestivalDigest)
 }
-func projectPrivateFestivalPurchase(c *pvfCeraShopCatalog, a *repo.AccountRecord, character string, q currentCeraShopPurchaseRequest, purchases []currentCeraShopResolvedPurchase) error {
+func projectPrivateFestivalPurchase(c *pvfCeraShopCatalog, a *repo.AccountRecord, character string, q currentCeraShopPurchaseRequest, purchases []currentCeraShopResolvedPurchase) ([]festival.Award, error) {
 	units := festivalCartUnits(c, q)
 	if len(units) == 0 {
-		return nil
+		return nil, nil
 	}
 	if q.FestivalRequestID == "" || len(purchases) != len(q.Items) {
-		return festival.ErrInvalid
+		return nil, festival.ErrInvalid
 	}
 	// Resolved checkout products must agree with the whitelist and paid units.
 	for _, p := range purchases {
 		if c.festivals.Commodities[c.couponBaseCommodity(p.Product.CommodityID)] != 0 && (p.Product.Count != 1 || p.Product.CeraPrice == 0) {
-			return festival.ErrInvalid
+			return nil, festival.ErrInvalid
 		}
 	}
-	st, e := festival.Load(a.Metadata[festival.MetadataKey])
+	st, e := festival.Load(a.Metadata[festival.StateKey(character)])
 	if e != nil {
-		return e
+		return nil, e
 	}
-	if e = festival.Apply(c.festivals, &st, units, character, q.FestivalRequestID, q.FestivalDigest); e != nil {
-		return e
+	minted, e := festival.Apply(c.festivals, &st, units, character, q.FestivalRequestID, q.FestivalDigest)
+	if e != nil {
+		return nil, e
 	}
 	raw, e := festival.Save(st)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	if a.Metadata == nil {
 		a.Metadata = map[string]string{}
 	}
-	a.Metadata[festival.MetadataKey] = raw
-	return nil
+	a.Metadata[festival.StateKey(character)] = raw
+	return minted, nil
+}
+
+// commitPrivateFestivalAwardsInTransaction grants minted tier awards into the
+// buyer's inventory inside the checkout transaction. Awards that do not fit
+// (backpack full) stay in Pending and fall back to mailbox delivery by
+// settlePrivateFestival, so a full backpack never fails the purchase.
+// Delivered awards are removed from Pending here; the account clone is
+// persisted by the surrounding checkout transaction. Returns one changed slot
+// per granted stack (same shape as the ordinary product grant loop) plus the
+// op64 bonus display rows.
+func commitPrivateFestivalAwardsInTransaction(
+	a *repo.AccountRecord,
+	inventory *repo.InventoryRecord,
+	c *pvfCeraShopCatalog,
+	awards []festival.Award,
+	character string,
+	now time.Time,
+) ([]currentCeraShopChangedSlot, []currentCeraShopBonusItem, error) {
+	if a == nil || inventory == nil || c == nil || len(awards) == 0 {
+		return nil, nil, nil
+	}
+	delivered := make(map[int]struct{}, len(awards))
+	bonuses := make([]currentCeraShopBonusItem, 0, len(awards))
+	changed := make([]currentCeraShopChangedSlot, 0, len(awards))
+	for i, award := range awards {
+		definition, err := c.items.ResolveItem(award.Reward.Item)
+		if err != nil {
+			return changed, bonuses, fmt.Errorf("private festival award item=%d: %v", award.Reward.Item, err)
+		}
+		definition, err = currentPVFItemDefinitionForGrantAt(definition, now)
+		if err != nil {
+			return changed, bonuses, fmt.Errorf("private festival award item=%d expiration: %v", award.Reward.Item, err)
+		}
+		// Trial grant on a cloned slot map: grantCurrentCeraShopProductAt may
+		// partially fill stacks before failing on a full backpack, so write
+		// back only the touched slots after a full success.
+		trial := *inventory
+		trial.Slots = make(map[string]repo.ItemStack, len(inventory.Slots)+1)
+		for key, value := range inventory.Slots {
+			trial.Slots[key] = value
+		}
+		slots, err := grantCurrentCeraShopProductAt(&trial, definition, award.Reward.Count, now)
+		if err != nil {
+			continue // backpack full: leave in Pending for mailbox delivery
+		}
+		for _, slot := range slots {
+			key := currentCeraShopInventorySlotKey(repo.MainInventoryListType, int16(slot))
+			inventory.Slots[key] = trial.Slots[key]
+			changed = append(changed, currentCeraShopChangedSlot{
+				ListType: repo.MainInventoryListType,
+				Slot:     int16(slot),
+				Product:  currentCeraShopProduct{ItemID: award.Reward.Item, Count: award.Reward.Count},
+				Festival: true,
+			})
+		}
+		delivered[i] = struct{}{}
+		bonuses = append(bonuses, currentCeraShopBonusItem{ItemID: award.Reward.Item, Count: award.Reward.Count})
+	}
+	if len(delivered) == 0 {
+		return nil, nil, nil
+	}
+	st, e := festival.Load(a.Metadata[festival.StateKey(character)])
+	if e != nil {
+		return changed, bonuses, e
+	}
+	keep := make([]festival.Award, 0, len(st.Pending))
+	for _, pending := range st.Pending {
+		consumed := false
+		for i := range awards {
+			if _, ok := delivered[i]; !ok {
+				continue
+			}
+			if pending.Period == awards[i].Period && pending.At == awards[i].At && pending.Character == awards[i].Character {
+				consumed = true
+				break
+			}
+		}
+		if !consumed {
+			keep = append(keep, pending)
+		}
+	}
+	st.Pending = keep
+	raw, e := festival.Save(st)
+	if e != nil {
+		return changed, bonuses, e
+	}
+	a.Metadata[festival.StateKey(character)] = raw
+	return changed, bonuses, nil
 }
 
 // A failure here does not roll back an already-paid order: its durable outbox
@@ -171,7 +267,7 @@ func (s *Service) settlePrivateFestival(ctx context.Context, session *gameSessio
 		if !found {
 			return festival.ErrInvalid
 		}
-		state, e = festival.Load(a.Metadata[festival.MetadataKey])
+		state, e = festival.Load(a.Metadata[festival.StateKey(character)])
 		if e != nil {
 			return e
 		}
@@ -197,7 +293,7 @@ func (s *Service) settlePrivateFestival(ctx context.Context, session *gameSessio
 			if name == "" {
 				name = "节日礼包"
 			}
-			_, e = repo.AppendSystemMail(ctx, boxes, repo.SystemMailDelivery{RecipientCharacterID: character, Title: fmt.Sprintf("%s第%d套赠礼", name, award.At), Body: "本账号累计购买奖励，请查收附件。", Source: "private_festival", CompletionKey: festival.CompletionKey(award), CreatedAt: now, Attachments: []repo.MailAttachment{{ItemID: int64(award.Reward.Item), Count: int64(award.Reward.Count), ExpireAt: def.ExpirationDate}}})
+			_, e = repo.AppendSystemMail(ctx, boxes, repo.SystemMailDelivery{RecipientCharacterID: character, Title: fmt.Sprintf("%s第%d套赠礼", name, award.At), Body: "本角色累计购买奖励，请查收附件。", Source: "private_festival", CompletionKey: festival.CompletionKey(award), CreatedAt: now, Attachments: []repo.MailAttachment{{ItemID: int64(award.Reward.Item), Count: int64(award.Reward.Count), ExpireAt: def.ExpirationDate}}})
 			if e != nil {
 				return e
 			}
@@ -214,7 +310,7 @@ func (s *Service) settlePrivateFestival(ctx context.Context, session *gameSessio
 		if !s.boundGameSessionCharacterCurrent(identity) || session.loginRevoked.Load() {
 			return festival.ErrInvalid
 		}
-		return repo.SaveAccountMetadataEntry(ctx, accounts, a, festival.MetadataKey, raw, now)
+		return repo.SaveAccountMetadataEntry(ctx, accounts, a, festival.StateKey(character), raw, now)
 	})
 	return state, c.festivals, e
 }

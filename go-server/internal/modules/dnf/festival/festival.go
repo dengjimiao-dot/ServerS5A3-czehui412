@@ -17,6 +17,15 @@ import (
 const PVFPath = "etc/chn_cerashop_multibonus.etc"
 const MetadataKey = "private_festival_v1"
 
+// festivalLoopCycle 是 2018 春节套的循环周期：按角色 12 套一循环，
+// 第 13 套回到第 1 套（无赠品）、14→二重…22→至尊一…24→至尊三。
+// PVF 的 RepeatFrom 仅作为是否启用循环的开关（>0 即启用）。
+const festivalLoopCycle = 12
+
+// StateKey 返回按角色隔离的元数据键。多买多送按角色累计：同一账号下
+// 不同角色各记各的套数，互不共享；账号级旧键 private_festival_v1 不再读写。
+func StateKey(character string) string { return MetadataKey + ":" + character }
+
 var ErrInvalid = errors.New("invalid festival catalog/state")
 var ErrReplay = errors.New("festival purchase already committed")
 
@@ -174,12 +183,15 @@ func CheckReceipt(s State, id, digest string) error {
 
 // Apply runs on the transaction-owned account clone, never on a global cache.
 // Quantities here are paid package units after resolving server catalog rows.
-func Apply(c *Catalog, s *State, units map[uint32]uint32, character, id, digest string) error {
+// It returns the tier awards minted by this purchase so the caller can grant
+// them into the buyer's inventory inside the same transaction (inventory-full
+// leftovers stay in Pending and fall back to mailbox delivery).
+func Apply(c *Catalog, s *State, units map[uint32]uint32, character, id, digest string) ([]Award, error) {
 	if c == nil || s == nil || character == "" || len(units) == 0 {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 	if e := CheckReceipt(*s, id, digest); e != nil {
-		return e
+		return nil, e
 	}
 	keys := make([]uint32, 0, len(units))
 	for k := range units {
@@ -187,34 +199,44 @@ func Apply(c *Catalog, s *State, units map[uint32]uint32, character, id, digest 
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	total := uint32(0)
+	minted := make([]Award, 0, 4)
 	for _, pid := range keys {
 		n := units[pid]
 		p, ok := c.Periods[pid]
 		if !ok || n == 0 || n > 64 || total > 64-n || s.Counts[pid] > math.MaxUint32-n {
-			return ErrInvalid
+			return nil, ErrInvalid
 		}
 		total += n
 		old := s.Counts[pid]
 		for off := uint32(1); off <= n; off++ {
 			at := old + off
 			r, ok := p.Tiers[at]
-			if p.RepeatFrom > 0 && at >= p.RepeatFrom {
-				r = p.Repeat
-				ok = true
+			if p.RepeatFrom > 0 && at > festivalLoopCycle {
+				// 12 套循环：第 13 套回到第 1 套重新计档（第 1/13 套无
+				// 赠品）。at=13→1、14→2（二重）、22→10（至尊一）、
+				// 24→12（至尊三）、25→1，以此类推。
+				loopAt := uint32((int(at)-1)%festivalLoopCycle + 1)
+				r, ok = p.Tiers[loopAt]
 			}
 			if ok {
-				s.Pending = append(s.Pending, Award{pid, at, character, r})
+				award := Award{pid, at, character, r}
+				s.Pending = append(s.Pending, award)
+				minted = append(minted, award)
 			}
 		}
 		s.Counts[pid] = old + n
 	}
 	if len(s.Pending) > 4096 {
-		return ErrInvalid
+		return nil, ErrInvalid
 	}
 	s.Receipts = append(s.Receipts, Receipt{id, digest})
 	if len(s.Receipts) > 128 {
 		s.Receipts = s.Receipts[len(s.Receipts)-128:]
 	}
-	return nil
+	return minted, nil
 }
-func CompletionKey(a Award) string { return fmt.Sprintf("festival:v1:%d:%d", a.Period, a.At) }
+// CompletionKey 含角色维度：按角色统计后，同账号不同角色在同一档位
+// 各有一封赠礼邮件，去重键不能跨角色碰撞。
+func CompletionKey(a Award) string {
+	return fmt.Sprintf("festival:v2:%s:%d:%d", a.Character, a.Period, a.At)
+}

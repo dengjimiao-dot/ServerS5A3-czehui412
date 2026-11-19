@@ -32,10 +32,25 @@ func parseCurrentCeraDiscountCoupons(d *pvf.Document, products map[uint32]curren
 		r := currentCeraDiscountCoupon{n[0], n[1], n[2], n[3], n[4]}
 		base, bok := products[r.Base]
 		p, pok := products[r.Discount]
-		if _, duplicate := out[r.Discount]; duplicate || !bok || !pok || r.Base == r.Discount || r.Percent >= 100 ||
-			base.Section != "package" || p.Section != base.Section || p.ItemID != base.ItemID || p.Count != base.Count ||
-			p.CeraPrice == 0 || uint64(p.CeraPrice) != uint64(base.CeraPrice)*uint64(r.Percent)/100 {
+		if _, duplicate := out[r.Discount]; duplicate {
+			return nil, fmt.Errorf("duplicate coupon discount binding %d", r.Discount)
+		}
+		if !bok || !pok {
+			// 绑定引用的商品已从 cerashop 下架（运营删除商城条目后折扣行仍
+			// 引用）：商品买不到，绑定随之失效，跳过而不是拒绝整个 catalog。
+			continue
+		}
+		if r.Base == r.Discount || r.Percent >= 100 {
+			// 结构性错误：自身绑定或比例非法，仍然 fail-closed。
 			return nil, fmt.Errorf("invalid coupon discount binding %d", r.Discount)
+		}
+		if base.Section != "package" || p.Section != base.Section || p.ItemID != base.ItemID || p.Count != base.Count ||
+			p.CeraPrice == 0 || uint64(p.CeraPrice) != uint64(base.CeraPrice)*uint64(r.Percent)/100 {
+			// 数据不一致（定制 PVF 折后价与折扣比例不符等）：降级为跳过——
+			// 该行不入折扣表，玩家用不了这张券、无法利用异常价，catalog 其余
+			// 部分不受影响。2026-11-17：上游代码未变但 1500374（39900×90%
+			// ≠31410）开始触发整 catalog 拒绝，定制档脏数据不应全商城连坐。
+			continue
 		}
 		out[r.Discount] = r
 	}

@@ -76,6 +76,9 @@ type currentCeraShopCommitResult struct {
 	AvatarInventoryExpansion uint16
 	AccountCargoSelectionKey uint16
 	PetInventoryChanged      bool
+	// FestivalBonus 是本次购买触发的多买多送档位赠礼（已当场入包），
+	// 追加进第一条 op64 购买回包的 bonus 行，结果窗与礼包同屏展示。
+	FestivalBonus            []currentCeraShopBonusItem
 	// GuildMedalInventoryChanged 表示本次购买落进了 wire list 38（公会勋章/
 	// 守护珠）。该容器有自己的权威快照构造器（buildCurrentItemListBodyForSession），
 	// 不能用 list 0/1 的 op14 增量行刷。
@@ -138,6 +141,9 @@ type currentCeraShopChangedSlot struct {
 	// itself; Product keeps the parent commodity for provenance while
 	// Product.ItemID is the granted bonus item.
 	Bonus bool
+	// Festival marks a slot filled by a private-festival tier gift (多买多送
+	// 达标赠礼)， granted inside the same checkout transaction.
+	Festival bool
 }
 
 // currentCeraShopCartSummary renders the client's op64 cart as `commodity:属性`
@@ -278,10 +284,16 @@ func (s *Service) handleCurrentCeraShopPurchase(session *gameSession, body []byt
 			// 顺延档位按新商品计价；ACK仍对应客户端这次请求的商品，结束原购买状态。
 			commodityID = request.Items[index].CommodityID
 		}
+		bonusRows := append([]currentCeraShopBonusItem{}, catalog.bonusByCommodity[product.CommodityID]...)
+		if index == 0 && len(result.FestivalBonus) > 0 {
+			// 多买多送跨档赠礼写进第一条购买回包：结果窗的商城购物奖励
+			// 面板与礼包本体同屏列出（如 2018春节礼包八重惊喜礼盒）。
+			bonusRows = append(bonusRows, result.FestivalBonus...)
+		}
 		if err := s.sendGameUpperRawClass(
 			session,
 			uint16(dnfenum.CmdPacketBuyCerashopItem),
-			buildCurrentCeraShopPurchaseSuccessBodyWithCount(commodityID, product.Count, catalog.bonusByCommodity[product.CommodityID]...),
+			buildCurrentCeraShopPurchaseSuccessBodyWithCount(commodityID, product.Count, bonusRows...),
 			dnfproto.DefaultChannelClassification,
 		); err != nil {
 			return err
@@ -912,6 +924,29 @@ func (s *Service) commitCurrentCeraShopPurchase(
 				}
 			}
 
+			if err := s.privateFestivalPreflight(session, account, request); err != nil {
+				return dnfcerashop.CheckoutChanges{}, err
+			}
+			mintedAwards, err := projectPrivateFestivalPurchase(catalog, account, characterID, request, purchases)
+			if err != nil {
+				return dnfcerashop.CheckoutChanges{}, err
+			}
+			// 多买多送档位奖励在结账事务内直接入包（对齐原版体验：结果窗
+			// 同时列出礼包与赠品）。背包放不下的档位留在 Pending，走
+			// settlePrivateFestival 的邮件兜底，绝不因此回滚整笔购买。
+			// 槽位必须并入 changedSlots 后由下方统一循环登记，才能进入
+			// updates 随购买回包推给客户端（否则背包要切角色才刷新）。
+			festivalChanges, festivalBonuses, err := commitPrivateFestivalAwardsInTransaction(account, inventory, catalog, mintedAwards, characterID, premiumNow)
+			if err != nil {
+				s.logGameEvent(session, "private-festival-inventory-grant-error", "error", err)
+			}
+			for _, change := range festivalChanges {
+				changedSlots[currentCeraShopInventorySlotKey(change.ListType, change.Slot)] = change
+			}
+			if len(festivalBonuses) > 0 {
+				inventoryChanged = true
+				result.FestivalBonus = festivalBonuses
+			}
 			for _, change := range changedSlots {
 				key := currentCeraShopInventorySlotKey(change.ListType, change.Slot)
 				stack, found := inventory.Slots[key]
@@ -928,6 +963,9 @@ func (s *Service) commitCurrentCeraShopPurchase(
 				stack.Extra["last_cera_shop_section"] = change.Product.Section
 				if change.Bonus {
 					stack.Extra["last_cera_shop_bonus"] = "one_plus_one_ipg"
+				}
+				if change.Festival {
+					stack.Extra["last_cera_shop_bonus"] = "private_festival_tier_gift"
 				}
 				if change.Product.DurationDays > 0 {
 					stack.Extra["cera_shop_duration_days"] = strconv.FormatUint(uint64(change.Product.DurationDays), 10)
@@ -963,14 +1001,9 @@ func (s *Service) commitCurrentCeraShopPurchase(
 				PremiumActivations:         premiumActivations,
 				NameTagActivation:          nameTagActivation,
 				SkillTreeExpanded:          includeSkills,
+				FestivalBonus:              festivalBonuses,
 			}
 			changes.Inventory = inventoryChanged
-			if err := s.privateFestivalPreflight(session, account, request); err != nil {
-				return dnfcerashop.CheckoutChanges{}, err
-			}
-			if err := projectPrivateFestivalPurchase(catalog, account, characterID, request, purchases); err != nil {
-				return dnfcerashop.CheckoutChanges{}, err
-			}
 			return changes, nil
 		},
 	})

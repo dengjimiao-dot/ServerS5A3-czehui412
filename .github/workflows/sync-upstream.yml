@@ -1,0 +1,88 @@
+# 自动同步上游：无冲突自动 rebase + go 编译验证 + 推送；有冲突自动开 issue 报告
+# 触发：每 6 小时定时 / Actions 页面手动 Run workflow
+# 前提：本仓库默认分支必须是 patches（schedule 从默认分支读取本文件）
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: patches
+          fetch-depth: 0
+
+      - name: Setup
+        run: |
+          git config user.name "90CN-CI"
+          git config user.email "local@patches.local"
+          git remote add official https://github.com/Cec1c/ServerS5A3.git
+          git fetch official master
+          git fetch origin base patches
+
+      - name: Fast-forward base
+        run: |
+          git checkout base
+          git merge --ff-only official/master
+          git push origin base
+
+      - name: Rebase patches onto base
+        id: rebase
+        run: |
+          git checkout patches
+          if git rebase base; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.rebase.outputs.conflict == 'false'
+        with:
+          go-version-file: go-server/go.mod
+          cache: false
+
+      - name: Build check
+        if: steps.rebase.outputs.conflict == 'false'
+        run: |
+          cd go-server
+          go build ./...
+          go test ./internal/services/dnfbridge/ -run TestPlayerAdmission -count=1
+
+      - name: Push merged result
+        if: steps.rebase.outputs.conflict == 'false'
+        run: |
+          git push origin --force-with-lease patches patches
+          # 若有历史冲突 issue 且已解决，自动关闭
+          GH_TOKEN=${{ secrets.GITHUB_TOKEN }} gh issue list \
+            --label sync-conflict --state open --json number -q '.[].number' | while read -r n; do
+            gh issue close "$n" -c "上游已自动同步完成，冲突已解决。" || true
+          done
+
+      - name: Report conflict
+        if: steps.rebase.outputs.conflict == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 重放收集冲突文件清单
+          git rebase base || true
+          files=$(git diff --name-only --diff-filter=U | sort -u)
+          git rebase --abort
+          body=$(printf '%s\n\n```\n%s\n```\n\n**处理方式**：本地 deploy\\_local\\ServerS5A3 拉最新 base 后 rebase，对照《源码更新手册》§1.1.1 高危文件表手工合并接线点，解完推送 mine patches，CI 会自动恢复同步并关闭本 issue。' \
+            "上游 master 有更新，patches rebase 冲突，需要人工合并。冲突文件：" "$files")
+          gh label create sync-conflict --color D93F0B 2>/dev/null || true
+          existing=$(gh issue list --label sync-conflict --state open --json number -q '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "上游同步冲突需要人工合并 $(date +%F)" --body "$body" --label sync-conflict
+          fi

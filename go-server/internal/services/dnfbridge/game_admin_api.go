@@ -297,6 +297,8 @@ func (a *accountAPIServer) handleGameAdmin(w http.ResponseWriter, r *http.Reques
 		}
 		entry := currentItemListEntryFromStack(req.ListType, req.Slot, *req.Stack)
 		out.StackRow = append([]byte(nil), entry.data[:]...)
+	case "registration_invites", "registration_invite_save", "registration_records", "registration_unbind":
+		a.handleRegistrationAdmin(r.Context(), req, &out)
 	default:
 		out.OK = false
 		out.Error = "unknown operation"

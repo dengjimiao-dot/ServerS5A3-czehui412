@@ -138,6 +138,9 @@ func (s *Service) createCharacter(session *gameSession, req createCharacterReque
 		"job", req.job,
 		"name", name,
 		"option_len", len(req.options))
+	// 建角色成功即通知 GM 网关投递该角色的福利（账号级 + 角色级规则一次全覆盖，
+	// 异步，失败只记日志；GM 侧回执幂等，与扫描轮/手动补发不冲突）。
+	s.benefitNotify.Notify(accountID, record.CharacterID)
 	return nil
 }
 

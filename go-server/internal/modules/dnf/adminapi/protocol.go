@@ -40,6 +40,10 @@ type Request struct {
 	Stack           *repository.ItemStack              `json:"stack,omitempty"`
 	RankQuery       *activityrank.Query                `json:"rankQuery,omitempty"`
 	RankSettlement  *repository.ActivityRankSettlement `json:"rankSettlement,omitempty"`
+	// 注册限制管理（registration_* action）：邀请码增删查 + 注册记录 + 机器码/IP 解绑。
+	RegistrationQuery   *RegistrationQuery      `json:"registrationQuery,omitempty"`
+	RegistrationInvite  *RegistrationInviteChange `json:"registrationInvite,omitempty"`
+	RegistrationUnbind  *RegistrationUnbind     `json:"registrationUnbind,omitempty"`
 }
 
 type Response struct {
@@ -76,4 +80,53 @@ type Response struct {
 	RankRewards        []repository.ActivityRankReward           `json:"rankRewards,omitempty"`
 	GoldSummary        *repository.ActivityGoldSummary           `json:"goldSummary,omitempty"`
 	CharacterGold      map[string]repository.ActivityGoldSummary `json:"characterGold,omitempty"`
+	// 注册限制管理结果。
+	RegistrationInvites []RegistrationInvite `json:"registrationInvites,omitempty"`
+	RegistrationRecords []RegistrationRecord `json:"registrationRecords,omitempty"`
+	RegistrationCodes   []string             `json:"registrationCodes,omitempty"`
+	RegistrationChanged bool                 `json:"registrationChanged,omitempty"`
+	RegistrationTotal   int                  `json:"registrationTotal,omitempty"`
+}
+
+// RegistrationQuery 分页查询邀请码 / 注册记录。
+type RegistrationQuery struct {
+	Limit  int `json:"limit,omitempty"`
+	Offset int `json:"offset,omitempty"`
+}
+
+// RegistrationInviteChange：op=create 批量生成（Count/MaxUses/ExpiresDays/Note），
+// op=revoke 作废指定 Code。
+type RegistrationInviteChange struct {
+	Op          string `json:"op,omitempty"`
+	Code        string `json:"code,omitempty"`
+	Count       int    `json:"count,omitempty"`
+	MaxUses     int    `json:"maxUses,omitempty"`
+	ExpiresDays int    `json:"expiresDays,omitempty"`
+	Note        string `json:"note,omitempty"`
+}
+
+// RegistrationUnbind：Kind=device 删除机器码占位（重装系统/换机后放行重新注册），
+// Kind=ip 清零该 IP 的注册计数。
+type RegistrationUnbind struct {
+	Kind  string `json:"kind,omitempty"`
+	Value string `json:"value,omitempty"`
+}
+
+type RegistrationInvite struct {
+	Code      string `json:"code"`
+	MaxUses   int    `json:"maxUses"`
+	Used      int    `json:"used"`
+	ExpiresAt string `json:"expiresAt,omitempty"`
+	Revoked   bool   `json:"revoked,omitempty"`
+	Note      string `json:"note,omitempty"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type RegistrationRecord struct {
+	AccountID string `json:"accountId"`
+	Account   string `json:"account,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	Device    string `json:"device,omitempty"`
+	Invite    string `json:"invite,omitempty"`
+	CreatedAt string `json:"createdAt,omitempty"`
 }

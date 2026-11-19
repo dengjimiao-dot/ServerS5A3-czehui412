@@ -188,6 +188,9 @@ type Service struct {
 	accountAPI        *accountAPIServer
 	playerAdmission   playerAdmission
 	signupBenefits    *signupbenefits.Store
+	// benefitNotify 在注册账号 / 创建角色成功后即时通知 GM 网关投递福利。
+	// 未配置时为 nil，调用方直接跳过。
+	benefitNotify *benefitNotifier
 	// 账号判定只有两条依据：启动器登录令牌（loginTokens）与本地客户端进程号登记
 	// （clientAccounts）。原来"最近登录 IP → 账号"的内存表与 accountIPCache
 	// 已于 2026-09-25 删除，见 client_account_ip.go。
@@ -357,10 +360,12 @@ func NewWithOptions(env *appkit.Env, serviceOptions ServiceOptions) *Service {
 		env = &appkit.Env{}
 	}
 	core := env.Core()
+	opts := optionsFromConfig(core.Config)
 	service := &Service{
 		performance:             newBridgePerformanceMetrics(core.Metrics),
 		logger:                  core.Logger,
-		options:                 optionsFromConfig(core.Config),
+		options:                 opts,
+		benefitNotify:           newBenefitNotifier(opts.benefitNotifyURL, opts.benefitNotifySecret, nil),
 		conns:                   make(map[net.Conn]struct{}),
 		gameSessions:            make(map[uint16]*gameSession),
 		liveGameSessions:        make(map[string]*gameSession),

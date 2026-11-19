@@ -718,7 +718,13 @@ type options struct {
 	playerAdminSecret       string
 	playerProxySecret       string
 	playerRegistrationLimit int
+	playerDeviceOnline      int
 	playerMaxOnline         int
+
+	// benefitNotifyURL / benefitNotifySecret 指向 GM 网关的即时福利投递入口
+	// （/api/internal/gateway/v1/benefit-deliver）。留空 = 关闭。
+	benefitNotifyURL    string
+	benefitNotifySecret string
 
 	// gameProactiveEndpointWhenUnbound 是握手顺序的回退开关
 	// （DNFBRIDGE_GAME_PROACTIVE_ENDPOINT_WHEN_UNBOUND=1）。
@@ -976,8 +982,15 @@ func optionsFromConfig(cfg config.ServiceConfig) options {
 		gmEditProtection:        envBool("DNFBRIDGE_GM_EDIT_PROTECTION", false),
 		playerAdminSecret:       envString("DNFBRIDGE_PLAYER_ADMIN_SECRET", ""),
 		playerProxySecret:       envString("DNFBRIDGE_PLAYER_PROXY_SECRET", ""),
-		playerRegistrationLimit: envInt("DNFBRIDGE_PLAYER_REGISTRATION_LIMIT", 0),
-		playerMaxOnline:         envInt("DNFBRIDGE_PLAYER_MAX_ONLINE", 0),
+		// 默认 1 = 一 IP 一号（方案 C，2026-11-18）；网吧等共享出口用邀请码绕过。
+		playerRegistrationLimit: envInt("DNFBRIDGE_PLAYER_REGISTRATION_LIMIT", 1),
+		// 同一机器码（device）允许同时在线的账号数：1 = 单开；双开/多开调大。
+		playerDeviceOnline: envInt("DNFBRIDGE_PLAYER_DEVICE_ONLINE", 1),
+		playerMaxOnline:    envInt("DNFBRIDGE_PLAYER_MAX_ONLINE", 0),
+		// 注册账号 / 创建角色成功后的即时福利投递通知目标（GM 网关内部端点）。
+		// 留空 = 关闭，福利退回 GM 侧轮询。
+		benefitNotifyURL:    envString("DNFBRIDGE_BENEFIT_NOTIFY_URL", ""),
+		benefitNotifySecret: envString("DNFBRIDGE_BENEFIT_NOTIFY_SECRET", ""),
 		// 握手顺序回退开关：置 1 才恢复"未绑定会话收主动端点成功包"的旧行为。
 		gameProactiveEndpointWhenUnbound: envBool("DNFBRIDGE_GAME_PROACTIVE_ENDPOINT_WHEN_UNBOUND", false),
 		patchDistDir:                     envString("DNFBRIDGE_PATCH_DIST_DIR", defaultPatchDistDir),

@@ -85,6 +85,8 @@ type accountAPIRequest struct {
 	Account                 string `json:"account"`
 	Password                string `json:"password"`
 	Device                  string `json:"device"`
+	// Invite 是管理员发放的注册邀请码（网吧/共享出口场景绕过机器码与 IP 双重限制）。
+	Invite string `json:"invite"`
 }
 
 type accountAPIResponse struct {
@@ -165,6 +167,11 @@ func (s *Service) startAccountAPI(ctx context.Context) error {
 	mux.HandleFunc("/api/account/password", api.handleAccountSecurity)
 	mux.HandleFunc("/api/player/admin", api.handlePlayerAdmin)
 	mux.HandleFunc("/api/game/admin", api.handleGameAdmin)
+	// CDK 兑换码（登录器用，账号密码验证；生成端点 /api/cdk/generate 走
+	// playerAdminSecret，见 cdk.go——网关代理剥 Authorization，生成调用直连游戏服）。
+	mux.HandleFunc("/api/cdk/redeem", api.handleCdkRedeem)
+	mux.HandleFunc("/api/cdk/characters", api.handleCdkCharacters)
+	mux.HandleFunc("/api/cdk/generate", api.handleCdkGenerate)
 	// 客户端补丁"云端更新"只读端点（复用同一个 7002，不新开端口）。
 	// 前缀跟 /api/account/* 一致：GET /api/patch/manifest.json 与
 	// GET /api/patch/file?path=<相对路径>；实现见 account_api_patch.go
@@ -260,6 +267,14 @@ func (a *accountAPIServer) ensureSchema(ctx context.Context) error {
 		return err
 	}
 	if err := a.ensurePlayerSchema(ctx); err != nil {
+		return err
+	}
+	// 注册限制（机器码占位 / 邀请码 / 来源留痕，见 registration_admin.go）。
+	if err := a.ensureRegistrationSchema(ctx); err != nil {
+		return err
+	}
+	// CDK 兑换码码表（pm_cdk_codes / pm_cdk_redemptions，见 cdk.go）。
+	if err := a.ensureCdkSchema(ctx); err != nil {
 		return err
 	}
 	benefits, err := signupbenefits.NewStore(a.db, a.table)
@@ -373,9 +388,23 @@ func (a *accountAPIServer) handleRegister(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := a.takeRegistrationSlot(ctx, tx, ip); err != nil {
-		writeAccountAPIError(w, http.StatusForbidden, "该 IP 已达到注册上限，或注册服务暂不可用")
-		return
+	// 注册限制（方案 C）：默认一机一号 + 一 IP 一号；有效邀请码绕过双重限制
+	// （仍受 IP 拉黑与限速约束，来源照常留痕）。防并发靠事务行锁，见 player_policy.go。
+	inviteCode := strings.ToUpper(strings.TrimSpace(request.Invite))
+	if inviteCode != "" {
+		if err := a.consumeRegistrationInvite(ctx, tx, inviteCode); err != nil {
+			writeAccountAPIError(w, http.StatusForbidden, err.Error())
+			return
+		}
+	} else {
+		if err := a.takeRegistrationDeviceSlot(ctx, tx, request.Device); err != nil {
+			writeAccountAPIError(w, http.StatusForbidden, err.Error())
+			return
+		}
+		if err := a.takeRegistrationSlot(ctx, tx, ip); err != nil {
+			writeAccountAPIError(w, http.StatusForbidden, "该 IP 注册名额已用完，可向管理员索取邀请码")
+			return
+		}
 	}
 
 	placeholder := fmt.Sprintf("pending:%d", time.Now().UnixNano())
@@ -397,9 +426,19 @@ func (a *accountAPIServer) handleRegister(w http.ResponseWriter, r *http.Request
 		return
 	}
 	accountID := fmt.Sprintf("dnf:%d", accountAPIBaseAccountID+rowID)
-	if _, err := tx.ExecContext(ctx, "INSERT INTO "+a.table+"_registration_sources (account_id, ip) VALUES (?, ?)", accountID, ip); err != nil {
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO "+a.table+"_registration_sources (account_id, ip, device, invite) VALUES (?, ?, ?, ?)",
+		accountID, ip, request.Device, inviteCode); err != nil {
 		writeAccountAPIError(w, http.StatusInternalServerError, "创建账号失败")
 		return
+	}
+	if inviteCode == "" && request.Device != "" {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE "+a.table+"_registration_devices SET account_id=? WHERE device=? AND account_id=''",
+			accountID, request.Device); err != nil {
+			writeAccountAPIError(w, http.StatusInternalServerError, "创建账号失败")
+			return
+		}
 	}
 	update := fmt.Sprintf("UPDATE %s SET account_id = ? WHERE id = ?", a.table)
 	if _, err := tx.ExecContext(ctx, update, accountID, rowID); err != nil {
@@ -416,6 +455,9 @@ func (a *accountAPIServer) handleRegister(w http.ResponseWriter, r *http.Request
 		writeAccountAPIError(w, http.StatusInternalServerError, "创建账号失败")
 		return
 	}
+	// 注册成功即通知 GM 网关投递账号级福利（异步，失败只记日志）。
+	// 此刻还没有角色，网关侧会 no-op；账号级规则的发放由随后的建角色触发。
+	a.service.benefitNotify.Notify(accountID, "")
 
 	writeAccountAPIJSON(w, http.StatusCreated, accountAPIResponse{
 		OK:        true,
@@ -483,11 +525,11 @@ func (a *accountAPIServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 			writeAccountAPIError(w, http.StatusForbidden, "该账号暂不可登录，请联系管理员")
 			return
 		}
-		available := a.service.playerAdmission.available
+		available := a.service.playerAdmission.availableWithDeviceLimit
 		if a.service.options.accountAPILoginToken {
 			available = a.service.playerAdmission.availableReplacement
 		}
-		if err := available(accountID, request.Device, a.service.options.playerMaxOnline, time.Now()); err != nil {
+		if err := available(accountID, request.Device, a.service.options.playerMaxOnline, a.service.options.playerDeviceOnline, time.Now()); err != nil {
 			writeAccountAPIError(w, http.StatusConflict, err.Error())
 			return
 		}

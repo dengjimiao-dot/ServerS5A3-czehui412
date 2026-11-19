@@ -43,17 +43,23 @@ func (p *playerAdmission) prune(now time.Time) {
 
 // Caller holds mu across token issuance and reservation.
 func (p *playerAdmission) available(account, device string, limit int, now time.Time) error {
+	return p.availableWithDeviceLimit(account, device, limit, 1, now)
+}
+
+// availableWithDeviceLimit 在总人数限额之外，按机器码限制同设备在线账号数
+// （deviceLimit 来自 DNFBRIDGE_PLAYER_DEVICE_ONLINE：1 单开，2+ 支持双开/多开）。
+func (p *playerAdmission) availableWithDeviceLimit(account, device string, limit, deviceLimit int, now time.Time) error {
 	p.prune(now)
 	if p.leases[account] != nil {
 		return errors.New("该账号已在线或正在连接，请退出后稍等再试")
 	}
-	return p.availableReplacement(account, device, limit, now)
+	return p.availableReplacement(account, device, limit, deviceLimit, now)
 }
 
 // A verified new launch replaces its own slot. Check the destination device
 // and server capacity before revoking anything; other accounts still count.
 // Caller holds mu through the token transaction and the new reservation.
-func (p *playerAdmission) availableReplacement(account, device string, limit int, now time.Time) error {
+func (p *playerAdmission) availableReplacement(account, device string, limit, deviceLimit int, now time.Time) error {
 	p.prune(now)
 	count := 0
 	online := 0
@@ -66,8 +72,14 @@ func (p *playerAdmission) availableReplacement(account, device string, limit int
 			count++
 		}
 	}
-	if count >= 1 {
-		return errors.New("每台设备只能同时登录一个账号，请先退出当前游戏")
+	if deviceLimit < 1 {
+		deviceLimit = 1
+	}
+	if count >= deviceLimit {
+		if deviceLimit == 1 {
+			return errors.New("每台设备只能同时登录一个账号，请先退出当前游戏")
+		}
+		return fmt.Errorf("每台设备最多同时登录 %d 个账号，请先退出一个客户端", deviceLimit)
 	}
 	if limit > 0 && online >= limit {
 		return errors.New("服务器人数已满，请稍后再试")
@@ -81,16 +93,21 @@ func (p *playerAdmission) reserve(account, device, token string, now time.Time) 
 }
 
 func (p *playerAdmission) attach(account, device, token string, session *gameSession, limit int, now time.Time) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.attachLocked(account, device, token, session, limit, now)
+	return p.attachDevice(account, device, token, session, limit, 1, now)
 }
 
-func (p *playerAdmission) attachLocked(account, device, token string, session *gameSession, limit int, now time.Time) error {
+// attachDevice 带设备在线限额（DNFBRIDGE_PLAYER_DEVICE_ONLINE）。
+func (p *playerAdmission) attachDevice(account, device, token string, session *gameSession, limit, deviceLimit int, now time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.attachLocked(account, device, token, session, limit, deviceLimit, now)
+}
+
+func (p *playerAdmission) attachLocked(account, device, token string, session *gameSession, limit, deviceLimit int, now time.Time) error {
 	p.prune(now)
 	lease := p.leases[account]
 	if lease == nil {
-		if err := p.available(account, device, limit, now); err != nil {
+		if err := p.availableWithDeviceLimit(account, device, limit, deviceLimit, now); err != nil {
 			return err
 		}
 		p.reserve(account, device, token, now)
@@ -161,7 +178,7 @@ func (a *accountAPIServer) takeRegistrationSlot(ctx context.Context, tx *sql.Tx,
 		return err
 	}
 	if used >= limit {
-		return errors.New("该 IP 已达到注册上限（两个账号）")
+		return fmt.Errorf("该 IP 注册名额已用完（上限 %d 个），可向管理员索取邀请码", limit)
 	}
 	_, err := tx.ExecContext(ctx, "UPDATE "+table+" SET used=used+1 WHERE ip=?", ip)
 	return err
@@ -189,7 +206,7 @@ func (s *Service) authenticatePlayer(session *gameSession, token string) error {
 	if err := a.requireQQBinding(ctx, account, false); err != nil {
 		return errPlayerAuthentication
 	}
-	if err := s.playerAdmission.attachLocked(account, device, token, session, s.options.playerMaxOnline, time.Now()); err != nil {
+	if err := s.playerAdmission.attachLocked(account, device, token, session, s.options.playerMaxOnline, s.options.playerDeviceOnline, time.Now()); err != nil {
 		return err
 	}
 	// Bind through the existing authoritative token path; strict mode always

@@ -38,20 +38,44 @@ func TestPlayerAdmissionReplacementCountsOnlyOtherAccounts(t *testing.T) {
 	p.prune(now)
 	p.reserve("a", "device", "old", now)
 	p.reserve("b", "other-device", "other", now)
-	if err := p.availableReplacement("a", "device", 2, now); err != nil {
+	if err := p.availableReplacement("a", "device", 2, 1, now); err != nil {
 		t.Fatal("same launch counted twice at full capacity", err)
 	}
-	if err := p.availableReplacement("c", "device", 0, now); err == nil {
+	if err := p.availableReplacement("c", "device", 0, 1, now); err == nil {
 		t.Fatal("second device account accepted")
 	}
-	if err := p.availableReplacement("c", "third-device", 2, now); err == nil {
+	if err := p.availableReplacement("c", "third-device", 2, 1, now); err == nil {
 		t.Fatal("third server account accepted")
 	}
-	if err := p.availableReplacement("a", "other-device", 0, now); err == nil {
+	if err := p.availableReplacement("a", "other-device", 0, 1, now); err == nil {
 		t.Fatal("replacement evaded destination device quota")
 	}
 	if p.leases["a"].token != "old" || len(p.leases) != 2 {
 		t.Fatal("capacity check mutated reservations")
+	}
+}
+
+// 双开：deviceLimit=2 时同机器码允许第二个账号，第三个仍被拒。
+func TestPlayerAdmissionDeviceLimitMultiOpen(t *testing.T) {
+	var p playerAdmission
+	now := time.Now()
+	p.prune(now) // 初始化 leases map
+	p.reserve("a", "device", "a", now)
+	p.reserve("b", "device", "b", now)
+	if err := p.availableReplacement("c", "device", 0, 2, now); err == nil {
+		t.Fatal("third device account accepted at deviceLimit=2")
+	}
+	if err := p.availableReplacement("c", "other-device", 0, 2, now); err != nil {
+		t.Fatal(err)
+	}
+	var q playerAdmission
+	q.prune(now)
+	q.reserve("a", "device", "a", now)
+	if err := q.availableReplacement("b", "device", 0, 2, now); err != nil {
+		t.Fatalf("second account rejected at deviceLimit=2: %v", err)
+	}
+	if err := q.availableReplacement("b", "device", 0, 1, now); err == nil {
+		t.Fatal("second account accepted at deviceLimit=1")
 	}
 }
 

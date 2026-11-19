@@ -27,3 +27,6 @@ __pycache__/
 /gm-tool/
 /gmtool/
 /go-server/internal/services/dnfbridge/gm_administrative_membership.go
+
+# 本地调试工具（保留在磁盘，不入库）
+/go-server/cmd/scratch/

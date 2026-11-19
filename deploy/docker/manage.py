@@ -97,6 +97,7 @@ RUNTIME_COMPATIBILITY_VALUES = {
     "DNFBRIDGE_LOGIN_SKILL_SWITCH_LOADOUT_AFTER_COMMIT": ("before_transition_only",),
     "DNFBRIDGE_PEER_SKILL_PAGE_TOWN": ("off",),
     "DNFBRIDGE_SKILL_SWITCH_DOWNLINK_SHAPE": ("off",),
+    "DNFBRIDGE_TOWN_DISPLAY_ONLY": ("on", "off"),
     "DNFBRIDGE_SKILL_SWITCH_ANSWER_AT_SCENE_READY": ("off",),
 }
 
@@ -270,13 +271,13 @@ def prepare(args):
     if existing:
         config = json.loads(instance.read_text(encoding="utf-8"))
         if args.host_ip:
-            config["host_ip"] = private_ipv4(args.host_ip)
+            config["host_ip"] = str(ipaddress.IPv4Address(args.host_ip))  # public-ip patch: allow advertised public address
         if args.client_dir:
             config["client_dir"] = str(Path(args.client_dir).resolve())
     else:
         config = {
             "profile": "docker-local-token-v1",
-            "host_ip": private_ipv4(args.host_ip) if args.host_ip else detect_ip(),
+            "host_ip": str(ipaddress.IPv4Address(args.host_ip)) if args.host_ip else detect_ip(),
             "subnet": "10.253.90.0/24", "server_ip": "10.253.90.2", "database_ip": "10.253.90.3",
             "database_password": secrets.token_hex(24), "root_password": secrets.token_hex(24),
             "admin_token": secrets.token_hex(32), "joust_event_enabled": True,
@@ -294,9 +295,9 @@ def prepare(args):
         config["buff_group_sync"] = buff_group_sync
     management_token(config)
     channel_source = selected_channel_table(config, getattr(args, "channel_info", None), existing)
-    private_ipv4(config["host_ip"])
+    ipaddress.IPv4Address(config["host_ip"])  # public-ip patch: allow advertised public address (upstream private_ipv4() forces RFC1918, unsuitable for cloud public IP)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind((config["host_ip"], 0))
+        probe.bind(("0.0.0.0", 0))  # public-ip patch: cloud public IP is not on the NIC
     for key in ("database_password", "root_password", "admin_token"):
         if not config.get(key) or any(ch not in "0123456789abcdef" for ch in config[key]):
             raise ValueError(f"{key} must remain a non-empty generated hex value")
@@ -524,6 +525,8 @@ create_databases = false
     }
     if game_token:
         env["DNFBRIDGE_PLAYER_ADMIN_SECRET"] = game_token
+    if c.get("player_proxy_secret"):
+        env["DNFBRIDGE_PLAYER_PROXY_SECRET"] = c["player_proxy_secret"]  # public-ip patch: PurpleMagic proxy auth
     if buff_swap_reapply is not None:
         env["DNFBRIDGE_BUFF_SWAP_REAPPLY"] = buff_swap_reapply
     if owner_range is not None:
@@ -552,7 +555,8 @@ create_databases = false
         "services": {
             "db": {"image": c.get("database_image", "mariadb:11.8@sha256:be1ef4fe5f14589325c08a41c76334097ce66c86264b75e1d28342c742782a61"),
                    "env_file": ["database.env"], "volumes": ["database:/var/lib/mysql"],
-                   "command": ["--bind-address=" + c["database_ip"], "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"],
+                   "ports": ["127.0.0.1:3307:3306"],  # public-ip patch: PurpleMagic on host needs MariaDB
+                   "command": ["--bind-address=0.0.0.0", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"],
                    "networks": {"private": {"ipv4_address": c["database_ip"]}}, "logging": logging,
                    "healthcheck": {"test": ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"], "interval": "5s", "timeout": "5s", "retries": 30}},
             "server": {"image": c.get("server_image", IMAGE), "init": True, "stop_grace_period": "45s",
@@ -560,9 +564,10 @@ create_databases = false
                        "env_file": ["server.env"], "volumes": ["./server:/runtime", "./data:/runtime/data/dnf:ro"],
                        "depends_on": {"db": {"condition": "service_healthy"}}, "mem_limit": c.get("server_memory_limit", "4g"), "logging": logging,
                        "networks": {"private": {"ipv4_address": c["server_ip"]}},
-                       "ports": [f"127.0.0.1:{p}:{p}/tcp" for p in (7001, 17002, 18111)] +
-                                [f"{c['host_ip']}:{p}:{p}/tcp" for p in catalog["ports"]] +
-                                [f"{c['host_ip']}:30000-{29999 + relay_count}:30000-{29999 + relay_count}/udp"],
+                       "ports": ["0.0.0.0:7001:7001/tcp"] +  # public-ip patch: launcher connects bootstrap directly
+                                [f"127.0.0.1:{p}:{p}/tcp" for p in (17002, 18111)] +
+                                [f"0.0.0.0:{p}:{p}/tcp" for p in catalog["ports"]] +  # public-ip patch
+                                [f"0.0.0.0:30000-{29999 + relay_count}:30000-{29999 + relay_count}/udp"],  # public-ip patch: dynamic relay range
                        "healthcheck": {"test": ["CMD", "wget", "-Y", "off", "-q", "-O", "/dev/null", f"http://{c['server_ip']}:17002/api/status"],
                                        "start_period": "180s", "interval": "10s", "timeout": "5s", "retries": 12}},
         },

@@ -32,6 +32,85 @@ func TestDemonRiftMultiEpicsPreserveRealPoolAndFragmentGuarantee(t *testing.T) {
 	}
 }
 
+func TestRiftCountTierGuaranteesPieceRange(t *testing.T) {
+	t.Cleanup(func() { riftPieceCountOverride.Store(-1) })
+	def := currentRiftLootDefinition{Equipment: []uint32{10, 11}, Pieces: []uint32{20, 21}, MultiEpicCount: true, PVFEpicCounts: []privatePVFEpicCount{{1, 500000}, {2, 300000}, {3, 150000}, {4, 50000}}}
+	if err := setRiftPieceCountOverride(5); err != nil {
+		t.Fatal(err)
+	}
+	var seen [6]int
+	for seed := uint32(1); seed <= 5000; seed++ {
+		epics := len(def.selectItems(newCurrentDungeonDropLCG(seed)))
+		if epics < 1 || epics > 5 {
+			t.Fatalf("count tier seed=%d epics=%d", seed, epics)
+		}
+		seen[epics]++
+	}
+	for n := 1; n <= 5; n++ {
+		if seen[n] < 200 {
+			t.Fatalf("count tier %d observed only %d times: %+v", n, seen[n], seen)
+		}
+	}
+	if err := setRiftPieceCountOverride(0); err != nil {
+		t.Fatal(err)
+	}
+	for seed := uint32(1); seed <= 100; seed++ {
+		if got := len(def.selectItems(newCurrentDungeonDropLCG(seed))); got != 0 {
+			t.Fatalf("off tier seed=%d items=%d", seed, got)
+		}
+	}
+}
+
+func TestRiftEpicRateOverrideGatesMultiEpicCount(t *testing.T) {
+	t.Cleanup(func() { riftEpicRateOverride.Store(-1) })
+	def := currentRiftLootDefinition{Equipment: []uint32{10, 11}, Pieces: []uint32{20, 21}, FragmentCount: 10, MultiEpicCount: true, PVFEpicCounts: []privatePVFEpicCount{{1, 500000}, {2, 300000}, {3, 150000}, {4, 50000}}}
+	if err := setRiftEpicRateOverride(0); err != nil {
+		t.Fatal(err)
+	}
+	for seed := uint32(1); seed <= 500; seed++ {
+		if got := len(def.selectItems(newCurrentDungeonDropLCG(seed))); got != 10 {
+			t.Fatalf("override=0 seed=%d items=%d", seed, got)
+		}
+	}
+	if err := setRiftEpicRateOverride(1000); err != nil {
+		t.Fatal(err)
+	}
+	var seen [5]bool
+	for seed := uint32(1); seed <= 500; seed++ {
+		epics := len(def.selectItems(newCurrentDungeonDropLCG(seed))) - 10
+		if epics < 1 || epics > 4 {
+			t.Fatalf("override=1000 seed=%d epics=%d", seed, epics)
+		}
+		seen[epics] = true
+	}
+	for n := 1; n <= 4; n++ {
+		if !seen[n] {
+			t.Fatalf("override=1000 never observed %d equipment", n)
+		}
+	}
+}
+
+func TestRiftEpicRateOverrideReplacesSingleEpicRate(t *testing.T) {
+	t.Cleanup(func() { riftEpicRateOverride.Store(-1) })
+	def := currentRiftLootDefinition{Equipment: []uint32{10}, EpicRate: 0.25}
+	if err := setRiftEpicRateOverride(0); err != nil {
+		t.Fatal(err)
+	}
+	for seed := uint32(1); seed <= 200; seed++ {
+		if got := len(def.selectItems(newCurrentDungeonDropLCG(seed))); got != 0 {
+			t.Fatalf("override=0 seed=%d items=%d", seed, got)
+		}
+	}
+	if err := setRiftEpicRateOverride(1000); err != nil {
+		t.Fatal(err)
+	}
+	for seed := uint32(1); seed <= 200; seed++ {
+		if got := len(def.selectItems(newCurrentDungeonDropLCG(seed))); got != 1 {
+			t.Fatalf("override=1000 seed=%d items=%d", seed, got)
+		}
+	}
+}
+
 func TestRiftRegisteredFragmentsUseNormalPickupAndReplayLedger(t *testing.T) {
 	s, runtime, repos := prepareCurrentEpicPieceDropTest(t)
 	scene, ok := runtime.Session.Scene()

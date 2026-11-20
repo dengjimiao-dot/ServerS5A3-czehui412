@@ -19,6 +19,8 @@ func setNativeHellRateOverride(rate int) error {
 	if rate < -1 || rate > 1000 {
 		return fmt.Errorf("hell epic rate must be -1 (PVF) or 0..1000, got %d", rate)
 	}
+	// Rate tiers (including the -1 clear) replace count tiers, never stack.
+	hellPieceCountOverride.Store(-1)
 	nativeHellRateOverride.Store(int32(rate))
 	return nil
 }

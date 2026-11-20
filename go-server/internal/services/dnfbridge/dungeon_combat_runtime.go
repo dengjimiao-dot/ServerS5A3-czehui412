@@ -566,12 +566,16 @@ func (s *Service) handleDungeonMonsterDeathRequest(
 				} else {
 					for _, recipient := range partyDungeonDropRecipients(runtime, session.selectedCharacterID, playerObjectKey) {
 						granted := 0
+						roomSeed := uint32(0)
 						if visit, visitErr := runtime.currentDungeonRoomVisit(scene); visitErr == nil && visit != nil {
+							roomSeed = visit.Seed
 							rewardRequest.rng = newCurrentDungeonDropLCG(visit.DropRNG)
 						}
 						var rewardResult hellPartyRewardResult
 						var rewardErr error
-						if s.options.currentClientVersion == "official-24.9" {
+						if countTier := hellPieceCount(); countTier >= 0 {
+							rewardResult, rewardErr = currentFixedCountHellReward(rewardRequest, countTier, roomSeed)
+						} else if s.options.currentClientVersion == "official-24.9" {
 							rewardResult, rewardErr = currentNativePVFHellReward(rewardRequest)
 						} else {
 							rewardResult, rewardErr = hellPartyRewardRolls(rewardRequest)

@@ -172,6 +172,13 @@ func (c *pvfDungeonDropCatalog) privateSpecialEpicProbability(id int64) (int, er
 // thresholds, item-level references and .equ creation weights. Environment
 // rarity filters and the former fixed 13% trial never participate.
 func currentNativePVFHellReward(request hellPartyRewardRequest) (hellPartyRewardResult, error) {
+	return currentNativePVFHellRewardWithChance(request, nil)
+}
+
+// currentNativePVFHellRewardWithChance keeps the exact PVF equipment/rarity
+// sampling path, with an optional forced hit chance used only by the runtime
+// fixed-count tier. Main-room RNG consumption is still owned by the caller.
+func currentNativePVFHellRewardWithChance(request hellPartyRewardRequest, forcedChance *int) (hellPartyRewardResult, error) {
 	r := hellPartyRewardResult{GroupID: request.GroupID, RewardRollCount: request.RewardRollCount, RateSource: hellPartyRewardDropInfoPath, RarityMode: "pvf", RarityAllowed: hellPartyRewardRarityAllList(), RarityOrder: "pvf", Pool: "equ", EpicWindowSource: "pvf_native_no_extra_window"}
 	if request.rng == nil || request.dropCatalog == nil {
 		return r, errDungeonHellPartyRewardDropRule
@@ -191,13 +198,17 @@ func currentNativePVFHellReward(request hellPartyRewardRequest) (hellPartyReward
 		return r, fmt.Errorf("PVF hell probability missing/invalid at level %d", request.DungeonBasisLevel)
 	}
 	r.Rate = rate
-	if rate == 0 {
+	if rate == 0 && forcedChance == nil {
 		return r, nil
 	}
 	if rate > 1000 {
 		rate = 1000
 	}
-	r.Chance, r.RateOverridden = nativeHellRate(int(rate))
+	if forcedChance != nil {
+		r.Chance, r.RateOverridden = *forcedChance, true
+	} else {
+		r.Chance, r.RateOverridden = nativeHellRate(int(rate))
+	}
 	row := int(request.AbyssPartyDifficulty) - 1
 	if row < 0 {
 		row = 0

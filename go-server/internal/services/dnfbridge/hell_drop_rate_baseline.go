@@ -12,9 +12,12 @@ func (s *Service) currentHellDropRateBaseline() (int, bool) {
 	if err != nil || len(info.Probabilities) == 0 {
 		return 0, false
 	}
-	row := info.Probabilities[0]
-	if len(row.Rates) == 0 {
-		return 0, false
+	for _, row := range info.Probabilities {
+		for _, r := range row.Rates {
+			if r > 0 {
+				return int(r), true
+			}
+		}
 	}
-	return int(row.Rates[0]), true
+	return 0, false
 }

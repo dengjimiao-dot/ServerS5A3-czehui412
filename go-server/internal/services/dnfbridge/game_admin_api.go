@@ -297,8 +297,9 @@ func (a *accountAPIServer) handleGameAdmin(w http.ResponseWriter, r *http.Reques
 		}
 		entry := currentItemListEntryFromStack(req.ListType, req.Slot, *req.Stack)
 		out.StackRow = append([]byte(nil), entry.data[:]...)
-	case "get_hell_drop_rate", "set_hell_drop_rate":
-		if req.Action == "set_hell_drop_rate" {
+	case "get_hell_drop_rate", "set_hell_drop_rate", "set_hell_drop_count":
+		switch req.Action {
+		case "set_hell_drop_rate":
 			if req.HellDropRate == nil {
 				out.OK = false
 				out.Error = "missing hellDropRate"
@@ -310,15 +311,56 @@ func (a *accountAPIServer) handleGameAdmin(w http.ResponseWriter, r *http.Reques
 				break
 			}
 			s.logInfo("game-admin-hell-drop-rate-set", "rate", *req.HellDropRate)
+		case "set_hell_drop_count":
+			if req.HellDropCount == nil {
+				out.OK = false
+				out.Error = "missing hellDropCount"
+				break
+			}
+			if err := setHellPieceCountOverride(*req.HellDropCount); err != nil {
+				out.OK = false
+				out.Error = err.Error()
+				break
+			}
+			s.logInfo("game-admin-hell-drop-count-set", "count", *req.HellDropCount)
 		}
 		effective, override := nativeHellRate(0)
 		baseline := 0
 		if p, ok := s.currentHellDropRateBaseline(); ok {
 			baseline = p
 		}
-		out.HellDropRate = &adminapi.HellDropRateStatus{
-			Rate: effective, Override: override, PVFBaseline: baseline, Scale: 1000,
+		status := dropRateStatus(effective, override, baseline, hellPieceCount())
+		out.HellDropRate = &status
+	case "get_rift_drop_rate", "set_rift_drop_rate", "set_rift_drop_count":
+		switch req.Action {
+		case "set_rift_drop_rate":
+			if req.RiftDropRate == nil {
+				out.OK = false
+				out.Error = "missing riftDropRate"
+				break
+			}
+			if err := setRiftEpicRateOverride(*req.RiftDropRate); err != nil {
+				out.OK = false
+				out.Error = err.Error()
+				break
+			}
+			s.logInfo("game-admin-rift-drop-rate-set", "rate", *req.RiftDropRate)
+		case "set_rift_drop_count":
+			if req.RiftDropCount == nil {
+				out.OK = false
+				out.Error = "missing riftDropCount"
+				break
+			}
+			if err := setRiftPieceCountOverride(*req.RiftDropCount); err != nil {
+				out.OK = false
+				out.Error = err.Error()
+				break
+			}
+			s.logInfo("game-admin-rift-drop-count-set", "count", *req.RiftDropCount)
 		}
+		effective, override := riftEpicRate(1)
+		status := dropRateStatus(effective, override, 1000, riftPieceCount())
+		out.RiftDropRate = &status
 	case "registration_invites", "registration_invite_save", "registration_records", "registration_unbind":
 		a.handleRegistrationAdmin(r.Context(), req, &out)
 	default:
@@ -328,6 +370,26 @@ func (a *accountAPIServer) handleGameAdmin(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+func dropRateStatus(rate int, rateOverride bool, pvfBaseline int, count int) adminapi.HellDropRateStatus {
+	status := adminapi.HellDropRateStatus{
+		Rate: rate, Override: rateOverride, PVFBaseline: pvfBaseline, Scale: 1000, Mode: "pvf",
+	}
+	if count >= 0 {
+		status.Override = true
+		if count == 0 {
+			status.Mode = "off"
+		} else {
+			status.Mode = "count"
+			status.MinPieces, status.MaxPieces = 1, count
+		}
+		return status
+	}
+	if rateOverride {
+		status.Mode = "rate"
+	}
+	return status
 }
 
 // Storage failures remain generic even when they wrap an operator sentinel.

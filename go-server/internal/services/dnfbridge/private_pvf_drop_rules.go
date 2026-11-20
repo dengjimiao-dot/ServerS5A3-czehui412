@@ -197,7 +197,7 @@ func currentNativePVFHellReward(request hellPartyRewardRequest) (hellPartyReward
 	if rate > 1000 {
 		rate = 1000
 	}
-	r.Chance = int(rate)
+	r.Chance, r.RateOverridden = nativeHellRate(int(rate))
 	row := int(request.AbyssPartyDifficulty) - 1
 	if row < 0 {
 		row = 0

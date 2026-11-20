@@ -41,9 +41,16 @@ func encodePrivateFestival(st festival.State, c *festival.Catalog, character uin
 		o := 32 + i*256
 		put32(o, id)
 		put32(o+4, st.Counts[id])
-		put32(o+8, p.RepeatFrom)
-		put32(o+12, p.Repeat.Item)
-		put32(o+16, p.Repeat.Count)
+		// Cycle mode is a settlement-only rule (festival.Period.Cycle). Sending
+		// RepeatFrom with a zero Repeat reward would render a bogus "第N套起
+		// 每套赠送 ×0" card in the unmodified client, so hide it on the wire.
+		repeatFrom, repeatItem, repeatCount := p.RepeatFrom, p.Repeat.Item, p.Repeat.Count
+		if p.Cycle() {
+			repeatFrom, repeatItem, repeatCount = 0, 0, 0
+		}
+		put32(o+8, repeatFrom)
+		put32(o+12, repeatItem)
+		put32(o+16, repeatCount)
 		pending := uint32(0)
 		for _, a := range st.Pending {
 			if a.Period == id {

@@ -28,6 +28,10 @@ type Period struct {
 	Repeat     Reward
 	Tiers      map[uint32]Reward
 }
+
+// Cycle reports whether the period replays its tier template: RepeatFrom>1
+// with a zero Repeat reward (PVF periods row "... <RepeatFrom> 0 0").
+func (p Period) Cycle() bool { return p.RepeatFrom > 1 && p.Repeat.Item == 0 && p.Repeat.Count == 0 }
 type Catalog struct {
 	Periods     map[uint32]Period
 	Commodities map[uint32]uint32
@@ -92,7 +96,9 @@ func Parse(d *pvf.Document) (*Catalog, error) {
 		item, e3 := num(r[3])
 		count, e4 := num(r[4])
 		name := strings.TrimSpace(r[1].Value)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || id == 0 || name == "" || len(name) > 64 || ((tail == 0) != (item == 0)) || ((item == 0) != (count == 0)) || count > 9999 {
+		// tail>0 & item=0 & count=0 marks cycle mode: after RepeatFrom-1 paid
+		// sets, replay the configured tiers starting at 1 (see Apply).
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || id == 0 || name == "" || len(name) > 64 || ((item == 0) != (count == 0)) || (tail == 0 && item != 0) || count > 9999 {
 			return nil, ErrInvalid
 		}
 		if _, ok := cat.Periods[id]; ok {
@@ -129,7 +135,9 @@ func Parse(d *pvf.Document) (*Catalog, error) {
 			}
 		}
 		p, ok := cat.Periods[v[0]]
-		if !ok || v[1] == 0 || v[1] > 10000 || v[2] == 0 || v[3] == 0 || v[3] > 9999 || p.Tiers[v[1]].Item != 0 || (p.RepeatFrom > 0 && v[1] >= p.RepeatFrom) {
+		// In cycle mode tiers are a replay template, so at may exceed RepeatFrom.
+		cycleMode := p.RepeatFrom > 0 && p.Repeat.Item == 0 && p.Repeat.Count == 0
+		if !ok || v[1] == 0 || v[1] > 10000 || v[2] == 0 || v[3] == 0 || v[3] > 9999 || p.Tiers[v[1]].Item != 0 || (!cycleMode && p.RepeatFrom > 0 && v[1] >= p.RepeatFrom) {
 			return nil, ErrInvalid
 		}
 		p.Tiers[v[1]] = Reward{v[2], v[3]}
@@ -195,12 +203,22 @@ func Apply(c *Catalog, s *State, units map[uint32]uint32, character, id, digest 
 		}
 		total += n
 		old := s.Counts[pid]
+		// Cycle mode (RepeatFrom>1 with zero Repeat reward): the first RepeatFrom-1
+		// sets are the template; from set RepeatFrom onward the set number maps back
+		// to (at-1)%(RepeatFrom-1)+1, so set 25 replays set 1, 26 replays 2, etc.
+		// Award.At stays the real cumulative set number so CompletionKey/mail
+		// de-duplication never collapses later cycles.
+		cycle := p.RepeatFrom - 1
+		cycleMode := p.Cycle()
 		for off := uint32(1); off <= n; off++ {
 			at := old + off
 			r, ok := p.Tiers[at]
 			if p.RepeatFrom > 0 && at >= p.RepeatFrom {
-				r = p.Repeat
-				ok = true
+				if cycleMode {
+					r, ok = p.Tiers[(at-1)%cycle+1]
+				} else {
+					r, ok = p.Repeat, true
+				}
 			}
 			if ok {
 				s.Pending = append(s.Pending, Award{pid, at, character, r})

@@ -297,6 +297,28 @@ func (a *accountAPIServer) handleGameAdmin(w http.ResponseWriter, r *http.Reques
 		}
 		entry := currentItemListEntryFromStack(req.ListType, req.Slot, *req.Stack)
 		out.StackRow = append([]byte(nil), entry.data[:]...)
+	case "get_hell_drop_rate", "set_hell_drop_rate":
+		if req.Action == "set_hell_drop_rate" {
+			if req.HellDropRate == nil {
+				out.OK = false
+				out.Error = "missing hellDropRate"
+				break
+			}
+			if err := setNativeHellRateOverride(*req.HellDropRate); err != nil {
+				out.OK = false
+				out.Error = err.Error()
+				break
+			}
+			s.logInfo("game-admin-hell-drop-rate-set", "rate", *req.HellDropRate)
+		}
+		effective, override := nativeHellRate(0)
+		baseline := 0
+		if p, ok := s.currentHellDropRateBaseline(); ok {
+			baseline = p
+		}
+		out.HellDropRate = &adminapi.HellDropRateStatus{
+			Rate: effective, Override: override, PVFBaseline: baseline, Scale: 1000,
+		}
 	case "registration_invites", "registration_invite_save", "registration_records", "registration_unbind":
 		a.handleRegistrationAdmin(r.Context(), req, &out)
 	default:

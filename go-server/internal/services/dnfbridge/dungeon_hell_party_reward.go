@@ -190,6 +190,7 @@ type hellPartyRewardResult struct {
 	Rate            int64
 	RateSource      string
 	Chance          int
+	RateOverridden  bool
 	Rolls           int
 	Misses          int
 	NoDrop          int

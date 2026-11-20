@@ -44,6 +44,16 @@ type Request struct {
 	RegistrationQuery   *RegistrationQuery      `json:"registrationQuery,omitempty"`
 	RegistrationInvite  *RegistrationInviteChange `json:"registrationInvite,omitempty"`
 	RegistrationUnbind  *RegistrationUnbind     `json:"registrationUnbind,omitempty"`
+	// 深渊史诗掉率动态覆盖：nil=仅读取当前值；非 nil=设置（0..1000，-1 清除回退 PVF）。
+	HellDropRate *int `json:"hellDropRate,omitempty"`
+}
+
+// HellDropRateStatus 是 GM 面板展示的掉率状态。
+type HellDropRateStatus struct {
+	Rate        int  `json:"rate"`
+	Override    bool `json:"override"`
+	PVFBaseline int  `json:"pvfBaseline"`
+	Scale       int  `json:"scale"`
 }
 
 type Response struct {
@@ -86,6 +96,7 @@ type Response struct {
 	RegistrationCodes   []string             `json:"registrationCodes,omitempty"`
 	RegistrationChanged bool                 `json:"registrationChanged,omitempty"`
 	RegistrationTotal   int                  `json:"registrationTotal,omitempty"`
+	HellDropRate        *HellDropRateStatus  `json:"hellDropRate,omitempty"`
 }
 
 // RegistrationQuery 分页查询邀请码 / 注册记录。

@@ -23,6 +23,11 @@ var (
 	ErrGiveUpNeedsAssets  = errors.New("quest give-up requires an inventory transaction")
 )
 
+// maxOrdinaryQuestTriggerProgress bounds the scalar op33 trigger counter.
+// A persisted progress above this is legacy corruption (an item count written
+// into a quest counter), not a legitimate remaining-count to decrement.
+const maxOrdinaryQuestTriggerProgress = 100000
+
 type Owner struct {
 	repositories dnfrepo.Group
 	characters   dnfrepo.CharacterRepository
@@ -632,6 +637,14 @@ func nextTriggerProgress(ctx context.Context, inventory dnfrepo.InventoryReposit
 	}
 	if cmd.IsIncrement {
 		return state.ProgressValue + 1
+	}
+	// A corrupt legacy active progress (e.g. 250343, likely an item count)
+	// must not be decremented one op33 at a time: the current EXE ACKs each
+	// step and immediately feeds the next one back, creating an unbounded
+	// client/server loop. Collapse it once so the handler ACKs a terminal
+	// zero and suppresses every identical replay that follows.
+	if state.ProgressValue > maxOrdinaryQuestTriggerProgress {
+		return 0
 	}
 	if state.ProgressValue > 0 {
 		return state.ProgressValue - 1

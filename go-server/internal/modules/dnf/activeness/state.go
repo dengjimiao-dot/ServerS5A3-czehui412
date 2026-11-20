@@ -80,7 +80,7 @@ func initState(ch *repo.CharacterRecord, c *Catalog, now time.Time) error {
 	}
 	for i, r := range c.Rewards {
 		prior := v[prefix+"rules011_prior_claimed"]
-		if prior < 0 || prior > 7 || prior & ^v[prefix+"claimed"] != 0 || (prior != 0 && c.Fingerprint != rules011NewFingerprint && c.Fingerprint != rewards006Fingerprint) {
+		if prior < 0 || prior > 7 || prior & ^v[prefix+"claimed"] != 0 || (prior != 0 && c.Fingerprint != rules011NewFingerprint && c.Fingerprint != rewards006Fingerprint && c.Fingerprint != rewards200Fingerprint) {
 			return ErrState
 		}
 		if v[prefix+"claimed"]&(1<<i) != 0 && prior&(1<<i) == 0 && points < int64(r.Required) {

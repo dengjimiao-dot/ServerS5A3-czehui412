@@ -615,6 +615,30 @@ func (s *Service) handleDungeonMonsterDeathRequest(
 									granted = len(wires)
 								}
 							}
+							// 深渊装备补满档：史诗保持原样，缺口用白装/蓝装补到 8 件。
+							// 独立 RNG（roomSeed 派生）不污染史诗/碎片序列； epic 件数取
+							// 本次已落地的史诗（当前 epic-only 档下 Selected 全是史诗）。
+							if ordinary := fillAbyssOrdinaryEquipment(
+								newCurrentDungeonDropLCG(roomSeed),
+								rewardRequest.dropCatalog,
+								rewardRequest.DungeonBasisLevel,
+								rewardRequest.DungeonMinimumLevel,
+								len(rewardResult.Selected),
+							); len(ordinary) != 0 {
+								wires, registerErr := s.registerHellPartyRewardDrops(
+									runtime, scene, rewardRequest, ordinary,
+									recipient.ActorKey, recipient.CharacterID,
+								)
+								if registerErr != nil {
+									s.logHellPartyRewardSkipped(session, "game-dungeon-hell-party-ordinary-fill-deferred",
+										runtime, scene, target.ObjectKey,
+										"reason", "ordinary_fill_registration_failed",
+										"error", registerErr)
+								} else {
+									hellPartyRewardWaves = append(hellPartyRewardWaves, wires...)
+									granted += len(wires)
+								}
+							}
 							s.logHellPartyRewardRoll(session, runtime, scene, target.ObjectKey,
 								rewardRequest, rewardResult, granted,
 								"vendor_DungeonKillApplicationService_cs_908_921_GenerateAbyssPartyAndRegister")

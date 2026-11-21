@@ -237,6 +237,12 @@ func (s *Service) planCurrentRiftBossDrops(session *gameSession, runtime *runtim
 	for _, recipient := range partyDungeonDropRecipients(runtime, session.selectedCharacterID, currentSceneActorObjectKey(session.selectedCharacterID)) {
 		countTarget := riftCountTierTarget(visit.DropRNG, riftPieceCount())
 		selected := definition.selectItems(rng)
+		// 裂缝史诗件数：selectItems 先追加 FragmentCount 个碎片、再追加 epics 件史诗，
+		// 在碳结晶/材料之前用长度差取史诗数，零额外 RNG。
+		epicCount := len(selected) - definition.FragmentCount
+		if epicCount < 0 {
+			epicCount = 0
+		}
 		// 此入口已由权威领主死亡触发；裂缝专用史诗奖励也保留耗疲劳领主的碳结晶体。
 		if currentDungeonCarbonCrystalEligible(runtime, definition.DropCatalog) {
 			selected = append(selected, hellPartyRewardItem{ItemID: currentDungeonCarbonCrystalItemID, Amount: 1})
@@ -247,6 +253,17 @@ func (s *Service) planCurrentRiftBossDrops(session *gameSession, runtime *runtim
 		}
 		for _, itemID := range materials {
 			selected = append(selected, hellPartyRewardItem{ItemID: itemID, Amount: 1})
+		}
+		// 裂缝装备补满档：史诗保持原样，缺口用白装/蓝装补到 8 件。
+		// 独立 RNG（visit.Seed 派生）不污染史诗/材料流。
+		if ordinary := fillAbyssOrdinaryEquipment(
+			newCurrentDungeonDropLCG(visit.Seed),
+			definition.DropCatalog,
+			runtime.Dungeon.Metadata.BasisLevel.Value,
+			runtime.Dungeon.Metadata.MinimumRequiredLevel.Value,
+			epicCount,
+		); len(ordinary) != 0 {
+			selected = append(selected, ordinary...)
 		}
 		memberWires, err := s.registerHellPartyRewardDrops(runtime, scene, hellPartyRewardRequest{dropCatalog: definition.DropCatalog, dungeonMonsterCatalog: definition.MonsterCatalog, rng: rng}, selected, recipient.ActorKey, recipient.CharacterID)
 		visit.DropRNG = rng.Seed()
